@@ -13,6 +13,8 @@
     width: 100%;
 
     .cvat-tasks-page-top-bar {
+        margin-right: $grid-unit-size;
+
         > div {
             display: flex;
             justify-content: space-between;
@@ -81,7 +83,7 @@
     overflow-y: auto;
 
     .ant-ribbon-wrapper {
-        margin-left: $grid-unit-size;
+        margin: $grid-unit-size;
     }
 }
 
@@ -108,7 +110,8 @@
     background: $background-color-1;
 
     &:hover {
-        border: 1px solid $border-color-hover;
+        transition: box-shadow 0.5s;
+        box-shadow: $box-shadow-base;
     }
 
     .cvat-task-item-loading-preview,

@@ -15,7 +15,6 @@
 
 .ant-btn.cvat-header-button {
     color: $text-color;
-    padding: 0 $grid-unit-size;
     margin-right: $grid-unit-size;
 }
 
@@ -56,7 +55,6 @@
 .cvat-header-menu-user-dropdown {
     display: flex;
     align-items: center;
-    border-left: 1px solid $border-color-1;
 
     .anticon.cvat-header-dropdown-icon {
         &.anticon-caret-down {
@@ -67,11 +65,11 @@
         padding: $grid-unit-size;
     }
 
-    > div:nth-child(2) {
-        > div:nth-child(2) { /* org slug */
-            font-size: 10px;
-        }
+    .cvat-header-menu-user-dropdown-organization {
+        font-size: 10px;
+    }
 
+    > div:nth-child(2) {
         max-width: $grid-unit-size * 15;
         height: $grid-unit-size * 5;
         overflow: hidden;
@@ -82,7 +80,7 @@
 }
 
 .cvat-header-menu {
-    width: $grid-unit-size * 20;
+    width: $grid-unit-size * 24;
 }
 
 .cvat-header-menu-active-organization-item {
