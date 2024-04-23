@@ -233,8 +233,15 @@ class DelimitedStringListField(serializers.ListField):
 class AttributeSerializer(serializers.ModelSerializer):
     id = serializers.IntegerField(required=False)
     values = DelimitedStringListField(allow_empty=True,
-        child=serializers.CharField(allow_blank=True, max_length=200),
-    )
+                                      child=serializers.CharField(allow_blank=True, max_length=200))
+    def to_representation(self, instance):
+        representation = super().to_representation(instance)
+
+        # modify attribute display for text input type
+        if instance.input_type == models.AttributeType.TEXT and 'values' in representation:
+            representation['values'] = ["\n".join(representation['values'])]
+
+        return representation
 
     class Meta:
         model = models.AttributeSpec
@@ -287,7 +294,9 @@ class LabelSerializer(SublabelSerializer):
         }
 
     def to_representation(self, instance):
+
         label = super().to_representation(instance)
+
         if label['type'] == str(models.LabelType.SKELETON):
             label['svg'] = instance.skeleton.svg
 
