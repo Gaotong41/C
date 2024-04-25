@@ -5,6 +5,7 @@
 
 import os
 import os.path as osp
+import functools
 from PIL import Image
 from types import SimpleNamespace
 from typing import Optional, Any, Dict, List, cast, Callable
@@ -12,6 +13,7 @@ import traceback
 import textwrap
 from copy import copy
 from datetime import datetime
+from redis.exceptions import ConnectionError as RedisConnectionError
 from tempfile import NamedTemporaryFile
 from textwrap import dedent
 
@@ -24,6 +26,8 @@ from django.db.models import Count
 from django.db.models.query import Prefetch
 from django.http import HttpResponse, HttpRequest, HttpResponseNotFound, HttpResponseBadRequest
 from django.utils import timezone
+from django.utils.decorators import method_decorator
+from django.views.decorators.cache import never_cache
 
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import (
@@ -71,10 +75,11 @@ from cvat.apps.engine.view_utils import get_cloud_storage_for_import_or_export
 from utils.dataset_manifest import ImageManifestManager
 from cvat.apps.engine.utils import (
     av_scan_paths, process_failed_job,
-    parse_exception_message, get_rq_job_meta, get_import_rq_id,
+    parse_exception_message, get_rq_job_meta,
     import_resource_with_clean_up_after, sendfile, define_dependent_job, get_rq_lock_by_user,
-    build_annotations_file_name,
+    build_annotations_file_name
 )
+from cvat.apps.engine.rq_job_handler import RQIdManager
 from cvat.apps.engine import backup
 from cvat.apps.engine.mixins import PartialUpdateModelMixin, UploadMixin, AnnotationMixin, SerializeMixin
 from cvat.apps.engine.location import get_location_configuration, StorageType
@@ -87,6 +92,11 @@ from cvat.apps.iam.permissions import (CloudStoragePermission,
 from cvat.apps.iam.filters import ORGANIZATION_OPEN_API_PARAMETERS
 from cvat.apps.engine.cache import MediaCache
 from cvat.apps.engine.view_utils import tus_chunk_action
+
+
+from rq.queue import Queue as RQQueue
+from rq.job import Job as RQJob
+from cvat.apps.engine.serializers import RQJobDetailsSerializer
 
 slogger = ServerLogManager(__name__)
 
@@ -253,7 +263,9 @@ class ProjectViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
     ordering = "-id"
     lookup_fields = {'owner': 'owner__username', 'assignee': 'assignee__username'}
     iam_organization_field = 'organization'
-    IMPORT_RQ_ID_TEMPLATE = get_import_rq_id('project', {}, 'dataset', {})
+    IMPORT_RQ_ID_TEMPLATE = RQIdManager.build(
+        'import', 'project', {}, subresource='dataset'
+    )
 
     def get_serializer_class(self):
         if self.request.method in SAFE_METHODS:
@@ -361,21 +373,21 @@ class ProjectViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
         else:
             action = request.query_params.get("action", "").lower()
             if action in ("import_status",):
+                # TODO
                 queue = django_rq.get_queue(settings.CVAT_QUEUES.IMPORT_DATA.value)
                 rq_id = request.query_params.get('rq_id')
                 if not rq_id:
                     return Response('The rq_id param should be specified in the query parameters', status=status.HTTP_400_BAD_REQUEST)
 
-                # check that the user has access to the current rq_job
-                # We should not return any status of job including "404 not found" for user that has no access for this rq_job
-
-                if self.IMPORT_RQ_ID_TEMPLATE.format(pk, request.user) != rq_id:
-                    return Response(status=status.HTTP_403_FORBIDDEN)
-
                 rq_job = queue.fetch_job(rq_id)
+
                 if rq_job is None:
                     return Response(status=status.HTTP_404_NOT_FOUND)
-                elif rq_job.is_finished:
+                # check that the user has access to the current rq_job
+                elif rq_job.meta.get('user', {}).get('id') != request.user.id:
+                    return Response(status=status.HTTP_403_FORBIDDEN)
+
+                if rq_job.is_finished:
                     rq_job.delete()
                     return Response(status=status.HTTP_201_CREATED)
                 elif rq_job.is_failed:
@@ -795,7 +807,9 @@ class TaskViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
     ordering_fields = list(filter_fields)
     ordering = "-id"
     iam_organization_field = 'organization'
-    IMPORT_RQ_ID_TEMPLATE = get_import_rq_id('task', {}, 'annotations', {})
+    IMPORT_RQ_ID_TEMPLATE = RQIdManager.build(
+        'import', 'task', {}, subresource='annotations'
+    )
 
     def get_serializer_class(self):
         if self.request.method in SAFE_METHODS:
@@ -1157,7 +1171,7 @@ class TaskViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
             https://docs.cvat.ai/docs/manual/advanced/dataset_manifest/
 
             After all data is sent, the operation status can be retrieved via
-            the /status endpoint.
+            the /api/requests endpoint.
 
             Once data is attached to a task, it cannot be detached or replaced.
         """.format_map(
@@ -1331,6 +1345,8 @@ class TaskViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
     @action(detail=True, methods=['GET', 'DELETE', 'PUT', 'PATCH', 'POST', 'OPTIONS'], url_path=r'annotations/?$',
         serializer_class=None, parser_classes=_UPLOAD_PARSER_CLASSES)
     def annotations(self, request, pk):
+        # TODO: mark as deprecated using this endpoint for checking status of import process
+
         self._object = self.get_object() # force call of check_object_permissions()
         if request.method == 'GET':
             if self._object.data:
@@ -1403,18 +1419,22 @@ class TaskViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
         summary='Get the creation status of a task',
         responses={
             '200': RqStatusSerializer,
-        })
+        },
+        deprecated=True,
+        description="This method is deprecated and will be removed in version 2.14.0. "
+                    "To check status of a task creation, use new common API for managing background operations: GET /requests/<rq_id>/",
+    )
     @action(detail=True, methods=['GET'], serializer_class=RqStatusSerializer)
     def status(self, request, pk):
         self.get_object() # force call of check_object_permissions()
         response = self._get_rq_response(
             queue=settings.CVAT_QUEUES.IMPORT_DATA.value,
-            job_id=f"create:task.id{pk}"
+            job_id=RQIdManager.build('create', 'task', pk)
         )
         serializer = RqStatusSerializer(data=response)
 
         serializer.is_valid(raise_exception=True)
-        return Response(serializer.data)
+        return Response(serializer.data,  headers={'Deprecation': 'true'})
 
     @staticmethod
     def _get_rq_response(queue, job_id):
@@ -1607,7 +1627,9 @@ class JobViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateMo
         'project_name': 'segment__task__project__name',
         'assignee': 'assignee__username'
     }
-    IMPORT_RQ_ID_TEMPLATE = get_import_rq_id('job', {}, 'annotations', {})
+    IMPORT_RQ_ID_TEMPLATE = RQIdManager.build(
+        'import', 'job', {}, subresource='annotations'
+    )
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -2826,12 +2848,12 @@ def _import_annotations(request, rq_id_template, rq_func, db_obj, format_name,
     rq_id = request.query_params.get('rq_id')
     rq_id_should_be_checked = bool(rq_id)
     if not rq_id:
-        rq_id = rq_id_template.format(db_obj.pk, request.user)
+        rq_id = rq_id_template.format(db_obj.pk)
 
     queue = django_rq.get_queue(settings.CVAT_QUEUES.IMPORT_DATA.value)
     rq_job = queue.fetch_job(rq_id)
 
-    if rq_id_should_be_checked and rq_id_template.format(db_obj.pk, request.user) != rq_id:
+    if rq_job and rq_id_should_be_checked and rq_job.meta.get('user', {}).get('id') != request.user.id:
         return Response(status=status.HTTP_403_FORBIDDEN)
 
     if rq_job and request.method == 'POST':
@@ -3002,7 +3024,6 @@ def _export_annotations(
 
                         rq_job.delete()
                         return sendfile(request, file_path, attachment=True, attachment_filename=filename)
-
                     return Response(status=status.HTTP_201_CREATED)
                 else:
                     raise NotImplementedError(f"Export to {location} location is not implemented yet")
@@ -3031,6 +3052,7 @@ def _export_annotations(
 
     func = callback if location == Location.LOCAL else export_resource_to_cloud_storage
     func_args = (db_instance.id, format_name, server_address)
+    save_result_url = True
 
     if location == Location.CLOUD_STORAGE:
         try:
@@ -3051,6 +3073,7 @@ def _export_annotations(
             is_annotation_file=is_annotation_file,
         )
         func_args = (db_storage, filename, filename_pattern, callback) + func_args
+        save_result_url = False
     else:
         db_storage = None
 
@@ -3059,7 +3082,7 @@ def _export_annotations(
             func=func,
             args=func_args,
             job_id=rq_id,
-            meta=get_rq_job_meta(request=request, db_obj=db_instance),
+            meta=get_rq_job_meta(request=request, db_obj=db_instance, include_result_url=save_result_url),
             depends_on=define_dependent_job(queue, user_id, rq_id=rq_id),
             result_ttl=ttl,
             failure_ttl=ttl,
@@ -3068,7 +3091,10 @@ def _export_annotations(
     handle_dataset_export(db_instance,
         format_name=format_name, cloud_storage=db_storage, save_images=not is_annotation_file)
 
-    return Response(status=status.HTTP_202_ACCEPTED)
+    serializer = RqIdSerializer(data={'rq_id': rq_id})
+    serializer.is_valid(raise_exception=True)
+
+    return Response(serializer.data, status=status.HTTP_202_ACCEPTED)
 
 def _import_project_dataset(request, rq_id_template, rq_func, db_obj, format_name, filename=None, conv_mask_to_poly=True, location_conf=None):
     format_desc = {f.DISPLAY_NAME: f
@@ -3079,7 +3105,7 @@ def _import_project_dataset(request, rq_id_template, rq_func, db_obj, format_nam
     elif not format_desc.ENABLED:
         return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
 
-    rq_id = rq_id_template.format(db_obj.pk, request.user)
+    rq_id = rq_id_template.format(db_obj.pk)
 
     queue = django_rq.get_queue(settings.CVAT_QUEUES.IMPORT_DATA.value)
     rq_job = queue.fetch_job(rq_id)
@@ -3156,3 +3182,192 @@ def _import_project_dataset(request, rq_id_template, rq_func, db_obj, format_nam
     serializer.is_valid(raise_exception=True)
 
     return Response(serializer.data, status=status.HTTP_202_ACCEPTED)
+
+@extend_schema(tags=['requests'])
+@extend_schema_view(
+    list=extend_schema(
+        summary='List RQ jobs',
+        parameters=[
+            OpenApiParameter(name='task_id', location=OpenApiParameter.QUERY, type=OpenApiTypes.INT),
+            OpenApiParameter(name='action', location=OpenApiParameter.QUERY, type=OpenApiTypes.STR, enum=['create']),
+        ],
+        responses={
+            '200': RQJobDetailsSerializer(many=True),
+        }
+    ),
+    retrieve=extend_schema(
+        summary='Get RQ job details',
+        responses={
+            '200': RQJobDetailsSerializer,
+        }
+    ),
+    destroy=extend_schema(
+        summary='Delete RQ job',
+        responses={
+            '204': OpenApiResponse(description='RQ job has been deleted'),
+        }
+    ),
+)
+class RequestViewSet(viewsets.GenericViewSet):
+    # TODO: support re-enqueue action
+    SUPPORTED_QUEUES = (
+        settings.CVAT_QUEUES.IMPORT_DATA.value,
+        settings.CVAT_QUEUES.EXPORT_DATA.value,
+    )
+
+    serializer_class = RQJobDetailsSerializer
+    iam_organization_field = None
+    filter_backends = []
+
+    def get_queryset(self):
+        return None
+
+    @property
+    def queues(self):
+        return (django_rq.get_queue(queue_name) for queue_name in self.SUPPORTED_QUEUES)
+
+    @staticmethod
+    def _is_job_owner(job: RQJob, user_id: int) -> bool:
+        return job.meta.get("user", {}).get("id") == user_id
+
+    def _get_rq_jobs_from_queue(self, queue: RQQueue, user_id: int) -> List[RQJob]:
+        job_ids = set(queue.get_job_ids() +
+            queue.started_job_registry.get_job_ids() +
+            queue.finished_job_registry.get_job_ids() +
+            queue.failed_job_registry.get_job_ids() +
+            queue.deferred_job_registry.get_job_ids()
+        )
+        all_user_jobs = sorted([
+            job for job in queue.job_class.fetch_many(job_ids, queue.connection)
+            if job and self._is_job_owner(job, user_id) and RQIdManager.can_be_parsed(job.id)
+        ], key=lambda job: job.created_at)
+
+        return all_user_jobs
+
+    def _get_rq_jobs(self, user_id: int) -> List[RQJob]:
+        """
+        Get all RQ jobs for a specific user and return them as a list of RQJob objects.
+
+        Parameters:
+            user_id (int): The ID of the user for whom to retrieve jobs.
+
+        Returns:
+            List[RQJob]: A list of RQJob objects representing all jobs for the specified user.
+        """
+        all_jobs = []
+        for queue in self.queues:
+            jobs = self._get_rq_jobs_from_queue(queue, user_id)
+            all_jobs.extend(jobs)
+
+        return all_jobs
+
+    def _get_rq_job_by_id(self, rq_id: str) -> Optional[RQJob]:
+        """
+        Get a RQJob by its ID from the queues.
+
+        Args:
+            rq_id (str): The ID of the RQJob to retrieve.
+
+        Returns:
+            Optional[RQJob]: The retrieved RQJob, or None if not found.
+        """
+        job: Optional[RQJob] = None
+
+        for queue in self.queues:
+            job = queue.fetch_job(rq_id)
+            if job:
+                break
+
+        return job
+
+    def _handle_redis_exceptions(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwarggs):
+            try:
+                return func(*args, **kwarggs)
+            except RedisConnectionError as ex:
+                msg = 'Redis service is not available'
+                slogger.glob.exception(f'{msg}: {str(ex)}')
+                return Response(msg, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return wrapper
+
+    @method_decorator(never_cache)
+    @_handle_redis_exceptions
+    def retrieve(self, request, pk: str):
+        job = self._get_rq_job_by_id(pk)
+
+        if not job:
+            return HttpResponseNotFound(f"There is no RQ job with specified rq_id: {pk}")
+
+        self.check_object_permissions(request, job)
+
+        serializer = self.get_serializer(job, context={'request': request})
+        return Response(data=serializer.data, status=status.HTTP_200_OK)
+
+    @method_decorator(never_cache)
+    @_handle_redis_exceptions
+    def list(self, request):
+        user_id = request.user.id
+        task_id = request.query_params.get('task_id')
+        action = request.query_params.get('action')
+
+        if task_id and action:
+            assert action == 'create'
+            rq_id = RQIdManager.build(action, 'task', task_id)
+            rq_job = self._get_rq_job_by_id(rq_id)
+
+            filtered_jobs = [] if (not rq_job or rq_job and not self._is_job_owner(rq_job, user_id)) else [rq_job]
+        else:
+            filtered_jobs = self._get_rq_jobs(user_id)
+
+        page = self.paginate_queryset(filtered_jobs)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True, context={'request': request})
+            return self.get_paginated_response(serializer.data)
+
+        serializer = self.get_serializer(filtered_jobs, many=True, context={'request': request})
+        return Response(data=serializer.data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        summary='Cancel RQ job',
+        request=None,
+        responses={
+            '200': OpenApiResponse(description='RQ job has been cancelled'),
+        },
+    )
+    @method_decorator(never_cache)
+    @action(detail=True, methods=['POST'], url_path='cancel')
+    @_handle_redis_exceptions
+    def cancel(self, request, pk: str):
+        rq_job = self._get_rq_job_by_id(pk)
+
+        if not rq_job:
+            return HttpResponseNotFound(f"There is no RQ job with specified rq_id: {pk!r}")
+
+        self.check_object_permissions(request, rq_job)
+
+        if not rq_job.is_started:
+            return HttpResponseBadRequest(f"Only started RQ jobs can be cancelled")
+
+        rq_job.cancel(enqueue_dependents=settings.ONE_RUNNING_JOB_IN_QUEUE_PER_USER)
+
+        return Response(status=status.HTTP_200_OK)
+
+    @method_decorator(never_cache)
+    @_handle_redis_exceptions
+    def destroy(self, request, pk: str):
+        rq_job = self._get_rq_job_by_id(pk)
+
+        if not rq_job:
+            return HttpResponseNotFound(f"There is no RQ job with specified rq_id: {pk!r}")
+
+        self.check_object_permissions(request, rq_job)
+
+        # this restriction was added because
+        # looks like dependent RQ jobs are not enqueued after calling job.delete()
+        if not any([rq_job.is_canceled, rq_job.is_finished, rq_job.is_failed]):
+            return HttpResponseBadRequest(f"Only canceled/finished/failed RQ jobs can be deleted")
+
+        rq_job.delete()
+
+        return Response(status=status.HTTP_204_NO_CONTENT)

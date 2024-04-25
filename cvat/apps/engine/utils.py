@@ -207,7 +207,12 @@ def get_rq_lock_by_user(queue: DjangoRQ, user_id: int) -> Union[Lock, nullcontex
         return queue.connection.lock(f'{queue.name}-lock-{user_id}', timeout=30)
     return nullcontext()
 
-def get_rq_job_meta(request, db_obj):
+def get_rq_job_meta(
+    request: HttpRequest,
+    db_obj: Any,
+    *,
+    include_result_url: bool = False,
+):
     # to prevent circular import
     from cvat.apps.webhooks.signals import project_id, organization_id
     from cvat.apps.events.handlers import task_id, job_id, organization_slug
@@ -218,7 +223,7 @@ def get_rq_job_meta(request, db_obj):
     tid = task_id(db_obj)
     jid = job_id(db_obj)
 
-    return {
+    meta = {
         'user': {
             'id': getattr(request.user, "id", None),
             'username': getattr(request.user, "username", None),
@@ -234,6 +239,14 @@ def get_rq_job_meta(request, db_obj):
         'task_id': tid,
         'job_id': jid,
     }
+
+    if include_result_url:
+        query_dict = request.query_params.copy()
+        if query_dict.get('action') != 'download':
+            query_dict['action'] = 'download'
+        meta['result_url'] = request.build_absolute_uri(request.path) + "?" + query_dict.urlencode()
+
+    return meta
 
 def reverse(viewname, *, args=None, kwargs=None,
     query_params: Optional[Dict[str, str]] = None,
@@ -271,15 +284,6 @@ def get_list_view_name(model):
     return '%(model_name)s-list' % {
         'model_name': model._meta.object_name.lower()
     }
-
-def get_import_rq_id(
-    resource_type: str,
-    resource_id: int,
-    subresource_type: str,
-    user: str,
-) -> str:
-    # import:<task|project|job>-<id|uuid>-<annotations|dataset|backup>-by-<user>
-    return f"import:{resource_type}-{resource_id}-{subresource_type}-by-{user}"
 
 def import_resource_with_clean_up_after(
     func: Union[Callable[[str, int, int], int], Callable[[str, int, str, bool], None]],
