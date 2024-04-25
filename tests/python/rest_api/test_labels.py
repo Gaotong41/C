@@ -584,7 +584,7 @@ class TestPatchLabels(_TestLabelsPermissionsBase):
         return response
 
     def _get_patch_data(
-        self, original_data: Dict[str, Any], **overrides
+        self, original_data: Dict[str, Any],attribute_rename=False, **overrides
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         result = deepcopy(original_data)
         result.update(overrides)
@@ -594,11 +594,24 @@ class TestPatchLabels(_TestLabelsPermissionsBase):
             payload = deepcopy(overrides)
 
             if overrides.get("attributes"):
-                payload["attributes"] = (original_data.get("attributes") or []) + overrides[
-                    "attributes"
-                ]
+                attributes = deepcopy(original_data.get("attributes", []))
+
+                if attribute_rename is False:
+                    ignore_fields.append("attributes.id")
+
+                updates_list = deepcopy(overrides["attributes"])
+                updates_dict = {update['id']: update for update in updates_list if 'id' in update}
+
+                for sub_array in attributes:
+                    if sub_array.get('id') in updates_dict:
+                        sub_array.update(updates_dict[sub_array['id']])
+
+                for sub_array in updates_list:
+                    if sub_array.get('id') is None:
+                        attributes.append(sub_array)
+
+                payload["attributes"] = attributes
                 result["attributes"] = deepcopy(payload["attributes"])
-                ignore_fields.append("attributes.id")
 
             # Changing skeletons is not supported
             if overrides.get("type") == "skeleton":
@@ -658,6 +671,26 @@ class TestPatchLabels(_TestLabelsPermissionsBase):
         )[0]
 
         expected_data, patch_data, ignore_fields = self._get_patch_data(label, **{param: newvalue})
+
+        self._test_update_ok(
+            user, label["id"], patch_data, expected_data=expected_data, ignore_fields=ignore_fields
+        )
+
+    def test_can_patch_attribute_name(self, admin_user):
+        user = admin_user
+        labels = []
+        for label in self.labels:
+            if label.get("attributes"):
+                labels.append(label)
+
+        label = next(iter(labels))
+
+        attributes = label['attributes']
+
+        for attribute in attributes:
+            attribute['name'] += "_updated"
+
+        expected_data, patch_data, ignore_fields = self._get_patch_data(label, attribute_rename=True, attributes=attributes)
 
         self._test_update_ok(
             user, label["id"], patch_data, expected_data=expected_data, ignore_fields=ignore_fields
