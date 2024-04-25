@@ -483,13 +483,27 @@ class CanvasWrapperComponent extends React.PureComponent<Props> {
         if (prevProps.highlightedConflict !== highlightedConflict) {
             const severity: HighlightSeverity | undefined = highlightedConflict
                 ?.severity as unknown as HighlightSeverity;
-            const highlightedClientIDs = (highlightedConflict?.annotationConflicts || [])
+            const highlightedShapeClientIDs = (highlightedConflict?.annotationConflicts || [])
                 .map((conflict: AnnotationConflict) => annotations
-                    .find((state) => state.serverID === conflict.serverID && state.objectType === conflict.type),
+                    .find((state) => conflict.type !== 'tag' && state.serverID === conflict.serverID && state.objectType === conflict.type),
                 ).filter((state: ObjectState | undefined) => !!state)
                 .map((state) => state?.clientID) as number[];
 
-            canvasInstance.highlight(highlightedClientIDs, severity || null);
+            // if current shape conflict ids is empty then there might be a conflict in tag annotations
+            if (highlightedShapeClientIDs.length === 0) {
+                const highlightedTagClientIDs = (highlightedConflict?.annotationConflicts || [])
+                    .map((conflict: AnnotationConflict) => annotations
+                        .find((state) => conflict.type === 'tag' && state.serverID === conflict.serverID && state.objectType === conflict.type),
+                    ).filter((state: ObjectState | undefined) => !!state)
+                    .map((state) => state?.clientID) as number[];
+
+                const states = annotations.filter((state) => highlightedTagClientIDs.includes(state.clientID || 0));
+                if (states) {
+                    this.updateHighlightedConflict(highlightedConflict);
+                }
+            } else {
+                canvasInstance.highlight(highlightedShapeClientIDs, severity || null);
+            }
         }
 
         if (gridSize !== prevProps.gridSize) {
@@ -596,6 +610,12 @@ class CanvasWrapperComponent extends React.PureComponent<Props> {
         canvasInstance.html().removeEventListener('canvas.error', this.onCanvasErrorOccurrence);
         canvasInstance.html().removeEventListener('canvas.message', this.onCanvasMessage as EventListener);
     }
+
+    // updates the value of highlightedConflict state based on the value of props
+    updateHighlightedConflict = (newHighlightedConflict: QualityConflict | null): void => {
+        // eslint-disable-next-line react/no-unused-state
+        this.setState({ highlightedConflict: newHighlightedConflict });
+    };
 
     private onCanvasErrorOccurrence = (event: any): void => {
         const { exception, domain } = event.detail;
