@@ -419,6 +419,7 @@ class ProjectViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
             format_name = request.query_params.get("format", "")
             filename = request.query_params.get("filename", "")
             conv_mask_to_poly = to_bool(request.query_params.get('conv_mask_to_poly', True))
+            keep_old_annotations = to_bool(request.query_params.get('keep_old_annotations', True))
             tmp_dir = self._object.get_tmp_dirname()
             uploaded_file = None
             if os.path.isfile(os.path.join(tmp_dir, filename)):
@@ -430,7 +431,8 @@ class ProjectViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
                 rq_func=dm.project.import_dataset_as_project,
                 db_obj=self._object,
                 format_name=format_name,
-                conv_mask_to_poly=conv_mask_to_poly
+                conv_mask_to_poly=conv_mask_to_poly,
+                keep_old_annotations=keep_old_annotations
             )
         elif self.action == 'import_backup':
             filename = request.query_params.get("filename", "")
@@ -1004,6 +1006,7 @@ class TaskViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
             format_name = request.query_params.get("format", "")
             filename = request.query_params.get("filename", "")
             conv_mask_to_poly = to_bool(request.query_params.get('conv_mask_to_poly', True))
+            keep_old_annotations = to_bool(request.query_params.get('keep_old_annotations', True))
             tmp_dir = self._object.get_tmp_dirname()
             if os.path.isfile(os.path.join(tmp_dir, filename)):
                 annotation_file = os.path.join(tmp_dir, filename)
@@ -1015,6 +1018,7 @@ class TaskViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
                         db_obj=self._object,
                         format_name=format_name,
                         conv_mask_to_poly=conv_mask_to_poly,
+                        keep_old_annotations=keep_old_annotations,
                     )
             return Response(data='No such file were uploaded',
                     status=status.HTTP_400_BAD_REQUEST)
@@ -1348,12 +1352,14 @@ class TaskViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
         elif request.method == 'POST' or request.method == 'OPTIONS':
             # NOTE: initialization process of annotations import
             format_name = request.query_params.get('format', '')
+            keep_old_annotations = to_bool(request.query_params.get('keep_old_annotations', True))
             return self.import_annotations(
                 request=request,
                 db_obj=self._object,
                 import_func=_import_annotations,
                 rq_func=dm.task.import_task_annotations,
-                rq_id_template=self.IMPORT_RQ_ID_TEMPLATE
+                rq_id_template=self.IMPORT_RQ_ID_TEMPLATE,
+                keep_old_annotations=keep_old_annotations
             )
         elif request.method == 'PUT':
             format_name = request.query_params.get('format', '')
@@ -1361,6 +1367,7 @@ class TaskViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
                 # NOTE: continue process of import annotations
                 use_settings = to_bool(request.query_params.get('use_default_location', True))
                 conv_mask_to_poly = to_bool(request.query_params.get('conv_mask_to_poly', True))
+                keep_old_annotations = to_bool(request.query_params.get('keep_old_annotations', True))
                 obj = self._object if use_settings else request.query_params
                 location_conf = get_location_configuration(
                     obj=obj, use_settings=use_settings, field_name=StorageType.SOURCE
@@ -1372,7 +1379,8 @@ class TaskViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
                     db_obj=self._object,
                     format_name=format_name,
                     location_conf=location_conf,
-                    conv_mask_to_poly=conv_mask_to_poly
+                    conv_mask_to_poly=conv_mask_to_poly,
+                    keep_old_annotations=keep_old_annotations
                 )
             else:
                 serializer = LabeledDataSerializer(data=request.data)
@@ -1648,6 +1656,7 @@ class JobViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateMo
             format_name = request.query_params.get("format", "")
             filename = request.query_params.get("filename", "")
             conv_mask_to_poly = to_bool(request.query_params.get('conv_mask_to_poly', True))
+            keep_old_annotations = to_bool(request.query_params.get('keep_old_annotations', True))
             tmp_dir = self.get_upload_dir()
             if os.path.isfile(os.path.join(tmp_dir, filename)):
                 annotation_file = os.path.join(tmp_dir, filename)
@@ -1659,6 +1668,7 @@ class JobViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateMo
                         db_obj=self._object,
                         format_name=format_name,
                         conv_mask_to_poly=conv_mask_to_poly,
+                        keep_old_annotations=keep_old_annotations,
                     )
             else:
                 return Response(data='No such file were uploaded',
@@ -1790,12 +1800,14 @@ class JobViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateMo
 
         elif request.method == 'POST' or request.method == 'OPTIONS':
             format_name = request.query_params.get('format', '')
+            keep_old_annotations = to_bool(request.query_params.get('keep_old_annotations', True))
             return self.import_annotations(
                 request=request,
                 db_obj=self._object,
                 import_func=_import_annotations,
                 rq_func=dm.task.import_job_annotations,
-                rq_id_template=self.IMPORT_RQ_ID_TEMPLATE
+                rq_id_template=self.IMPORT_RQ_ID_TEMPLATE,
+                keep_old_annotations=keep_old_annotations
             )
 
         elif request.method == 'PUT':
@@ -1803,6 +1815,7 @@ class JobViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateMo
             if format_name:
                 use_settings = to_bool(request.query_params.get('use_default_location', True))
                 conv_mask_to_poly = to_bool(request.query_params.get('conv_mask_to_poly', True))
+                keep_old_annotations = to_bool(request.query_params.get('keep_old_annotations', True))
                 obj = self._object.segment.task if use_settings else request.query_params
                 location_conf = get_location_configuration(
                     obj=obj, use_settings=use_settings, field_name=StorageType.SOURCE
@@ -1814,7 +1827,8 @@ class JobViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateMo
                     db_obj=self._object,
                     format_name=format_name,
                     location_conf=location_conf,
-                    conv_mask_to_poly=conv_mask_to_poly
+                    conv_mask_to_poly=conv_mask_to_poly,
+                    keep_old_annotations=keep_old_annotations
                 )
             else:
                 serializer = LabeledDataSerializer(data=request.data)
@@ -2814,7 +2828,7 @@ def rq_exception_handler(rq_job, exc_type, exc_value, tb):
     return True
 
 def _import_annotations(request, rq_id_template, rq_func, db_obj, format_name,
-                        filename=None, location_conf=None, conv_mask_to_poly=True):
+                        filename=None, location_conf=None, conv_mask_to_poly=True, keep_old_annotations=True):
 
     format_desc = {f.DISPLAY_NAME: f
         for f in dm.views.get_import_formats()}.get(format_name)
@@ -2883,7 +2897,7 @@ def _import_annotations(request, rq_id_template, rq_func, db_obj, format_name,
                     filename = tf.name
 
         func = import_resource_with_clean_up_after
-        func_args = (rq_func, filename, db_obj.pk, format_name, conv_mask_to_poly)
+        func_args = (rq_func, filename, db_obj.pk, format_name, conv_mask_to_poly, keep_old_annotations)
 
         if location == Location.CLOUD_STORAGE:
             func_args = (db_storage, key, func) + func_args
